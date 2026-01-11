@@ -32,6 +32,8 @@ struct _lv_ffmpeg_player_t {
     lv_image_dsc_t imgdsc;
     bool auto_restart;
     struct ffmpeg_context_s * ffmpeg_ctx;
+    int volume;
+    bool audio_enabled;
 };
 
 /**********************

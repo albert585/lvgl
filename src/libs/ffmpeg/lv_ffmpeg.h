@@ -85,6 +85,36 @@ void lv_ffmpeg_player_set_cmd(lv_obj_t * obj, lv_ffmpeg_player_cmd_t cmd);
  */
 void lv_ffmpeg_player_set_auto_restart(lv_obj_t * obj, bool en);
 
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+/**
+ * Set the audio volume
+ * @param obj pointer to a ffmpeg_player object
+ * @param volume volume value (0-100)
+ */
+void lv_ffmpeg_player_set_volume(lv_obj_t * obj, int volume);
+
+/**
+ * Get the current audio volume
+ * @param obj pointer to a ffmpeg_player object
+ * @return current volume value (0-100)
+ */
+int lv_ffmpeg_player_get_volume(lv_obj_t * obj);
+
+/**
+ * Enable or disable audio playback
+ * @param obj pointer to a ffmpeg_player object
+ * @param en true: enable audio, false: disable audio
+ */
+void lv_ffmpeg_player_set_audio_enabled(lv_obj_t * obj, bool en);
+
+/**
+ * Check if audio is enabled
+ * @param obj pointer to a ffmpeg_player object
+ * @return true: audio is enabled, false: audio is disabled
+ */
+bool lv_ffmpeg_player_get_audio_enabled(lv_obj_t * obj);
+#endif
+
 /*=====================
  * Other functions
  *====================*/

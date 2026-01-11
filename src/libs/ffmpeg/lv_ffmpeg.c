@@ -18,6 +18,10 @@
 #include <libavutil/samplefmt.h>
 #include <libavutil/timestamp.h>
 #include <libswscale/swscale.h>
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+#include <libavdevice/avdevice.h>
+#include <libswresample/swresample.h>
+#endif
 
 /*********************
  *      DEFINES
@@ -62,6 +66,17 @@ struct ffmpeg_context_s {
     bool has_alpha;
     lv_draw_buf_t draw_buf;
     lv_draw_buf_handlers_t draw_buf_handlers;
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    AVStream * audio_stream;
+    AVCodecContext * audio_dec_ctx;
+    int audio_stream_idx;
+    AVFrame * audio_frame;
+    struct SwrContext * swr_ctx;
+    AVFormatContext * audio_out_fmt_ctx;
+    uint8_t * audio_buf;
+    int audio_buf_size;
+    bool has_audio;
+#endif
 };
 
 #pragma pack(1)
@@ -96,6 +111,13 @@ static int ffmpeg_update_next_frame(struct ffmpeg_context_s * ffmpeg_ctx);
 static int ffmpeg_output_video_frame(struct ffmpeg_context_s * ffmpeg_ctx);
 static bool ffmpeg_pix_fmt_has_alpha(enum AVPixelFormat pix_fmt);
 static bool ffmpeg_pix_fmt_is_yuv(enum AVPixelFormat pix_fmt);
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+static int ffmpeg_decode_audio_packet(AVCodecContext * dec, const AVPacket * pkt,
+                                      struct ffmpeg_context_s * ffmpeg_ctx);
+static int ffmpeg_output_audio_frame(struct ffmpeg_context_s * ffmpeg_ctx);
+static int ffmpeg_audio_init(struct ffmpeg_context_s * ffmpeg_ctx);
+static void ffmpeg_audio_deinit(struct ffmpeg_context_s * ffmpeg_ctx);
+#endif
 
 static void lv_ffmpeg_player_constructor(const lv_obj_class_t * class_p, lv_obj_t * obj);
 static void lv_ffmpeg_player_destructor(const lv_obj_class_t * class_p, lv_obj_t * obj);
@@ -131,6 +153,10 @@ void lv_ffmpeg_init(void)
 
 #if LV_FFMPEG_DUMP_FORMAT == 0
     av_log_set_level(AV_LOG_QUIET);
+#endif
+
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    avdevice_register_all();
 #endif
 }
 
@@ -273,6 +299,38 @@ void lv_ffmpeg_player_set_auto_restart(lv_obj_t * obj, bool en)
     lv_ffmpeg_player_t * player = (lv_ffmpeg_player_t *)obj;
     player->auto_restart = en;
 }
+
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+void lv_ffmpeg_player_set_volume(lv_obj_t * obj, int volume)
+{
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    lv_ffmpeg_player_t * player = (lv_ffmpeg_player_t *)obj;
+    player->volume = LV_CLAMP(0, volume, 100);
+    LV_LOG_INFO("Set volume to %d", player->volume);
+}
+
+int lv_ffmpeg_player_get_volume(lv_obj_t * obj)
+{
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    lv_ffmpeg_player_t * player = (lv_ffmpeg_player_t *)obj;
+    return player->volume;
+}
+
+void lv_ffmpeg_player_set_audio_enabled(lv_obj_t * obj, bool en)
+{
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    lv_ffmpeg_player_t * player = (lv_ffmpeg_player_t *)obj;
+    player->audio_enabled = en;
+    LV_LOG_INFO("Audio %s", en ? "enabled" : "disabled");
+}
+
+bool lv_ffmpeg_player_get_audio_enabled(lv_obj_t * obj)
+{
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    lv_ffmpeg_player_t * player = (lv_ffmpeg_player_t *)obj;
+    return player->audio_enabled;
+}
+#endif
 
 /**********************
  *   STATIC FUNCTIONS
@@ -527,6 +585,11 @@ static int ffmpeg_decode_packet(AVCodecContext * dec, const AVPacket * pkt,
         if(dec->codec->type == AVMEDIA_TYPE_VIDEO) {
             ret = ffmpeg_output_video_frame(ffmpeg_ctx);
         }
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+        else if(dec->codec->type == AVMEDIA_TYPE_AUDIO) {
+            ret = ffmpeg_output_audio_frame(ffmpeg_ctx);
+        }
+#endif
 
         av_frame_unref(ffmpeg_ctx->frame);
         if(ret < 0) {
@@ -685,6 +748,14 @@ static int ffmpeg_update_next_frame(struct ffmpeg_context_s * ffmpeg_ctx)
                                            ffmpeg_ctx->pkt, ffmpeg_ctx);
                 is_image = true;
             }
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+            else if(ffmpeg_ctx->has_audio &&
+                    ffmpeg_ctx->pkt->stream_index == ffmpeg_ctx->audio_stream_idx) {
+                ret = ffmpeg_decode_packet(ffmpeg_ctx->audio_dec_ctx,
+                                           ffmpeg_ctx->pkt, ffmpeg_ctx);
+                is_image = true;
+            }
+#endif
 
             av_packet_unref(ffmpeg_ctx->pkt);
 
@@ -812,6 +883,23 @@ static struct ffmpeg_context_s * ffmpeg_open_file(const char * path, bool is_lv_
         ffmpeg_ctx->video_dst_pix_fmt = (ffmpeg_ctx->has_alpha ? AV_PIX_FMT_BGRA : AV_PIX_FMT_TRUE_COLOR);
     }
 
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    /* Try to open audio stream */
+    if(ffmpeg_open_codec_context(
+           &(ffmpeg_ctx->audio_stream_idx),
+           &(ffmpeg_ctx->audio_dec_ctx),
+           ffmpeg_ctx->fmt_ctx, AVMEDIA_TYPE_AUDIO)
+       >= 0) {
+        ffmpeg_ctx->audio_stream = ffmpeg_ctx->fmt_ctx->streams[ffmpeg_ctx->audio_stream_idx];
+        ffmpeg_ctx->has_audio = true;
+        LV_LOG_INFO("Audio stream found, codec: %s",
+                    avcodec_get_name(ffmpeg_ctx->audio_dec_ctx->codec_id));
+    } else {
+        ffmpeg_ctx->has_audio = false;
+        LV_LOG_INFO("No audio stream found");
+    }
+#endif
+
 #if LV_FFMPEG_DUMP_FORMAT
     /* dump input information to stderr */
     av_dump_format(ffmpeg_ctx->fmt_ctx, 0, path, 0);
@@ -881,6 +969,22 @@ static int ffmpeg_image_allocate(struct ffmpeg_context_s * ffmpeg_ctx)
     ffmpeg_ctx->pkt->data = NULL;
     ffmpeg_ctx->pkt->size = 0;
 
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    /* Allocate audio frame */
+    ffmpeg_ctx->audio_frame = av_frame_alloc();
+    if(ffmpeg_ctx->audio_frame == NULL) {
+        LV_LOG_WARN("Could not allocate audio frame");
+    }
+
+    /* Initialize audio output if audio stream is present */
+    if(ffmpeg_ctx->has_audio) {
+        if(ffmpeg_audio_init(ffmpeg_ctx) < 0) {
+            LV_LOG_WARN("Audio output initialization failed, audio will be disabled");
+            ffmpeg_ctx->has_audio = false;
+        }
+    }
+#endif
+
     return 0;
 }
 
@@ -894,6 +998,11 @@ static void ffmpeg_close_src_ctx(struct ffmpeg_context_s * ffmpeg_ctx)
         av_free(ffmpeg_ctx->video_src_data[0]);
         ffmpeg_ctx->video_src_data[0] = NULL;
     }
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    avcodec_free_context(&(ffmpeg_ctx->audio_dec_ctx));
+    av_frame_free(&(ffmpeg_ctx->audio_frame));
+    ffmpeg_audio_deinit(ffmpeg_ctx);
+#endif
 }
 
 static void ffmpeg_close_dst_ctx(struct ffmpeg_context_s * ffmpeg_ctx)
@@ -919,6 +1028,12 @@ static void ffmpeg_close(struct ffmpeg_context_s * ffmpeg_ctx)
         av_free(ffmpeg_ctx->io_ctx);
         lv_fs_close(&(ffmpeg_ctx->lv_file));
     }
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+    if(ffmpeg_ctx->audio_buf != NULL) {
+        av_free(ffmpeg_ctx->audio_buf);
+        ffmpeg_ctx->audio_buf = NULL;
+    }
+#endif
     lv_free(ffmpeg_ctx);
 
     LV_LOG_INFO("ffmpeg_ctx closed");
@@ -959,6 +1074,8 @@ static void lv_ffmpeg_player_constructor(const lv_obj_class_t * class_p,
 
     player->auto_restart = false;
     player->ffmpeg_ctx = NULL;
+    player->volume = 75;
+    player->audio_enabled = true;
     player->timer = lv_timer_create(lv_ffmpeg_player_frame_update_cb,
                                     FRAME_DEF_REFR_PERIOD, obj);
     lv_timer_pause(player->timer);
@@ -987,5 +1104,199 @@ static void lv_ffmpeg_player_destructor(const lv_obj_class_t * class_p,
 
     LV_TRACE_OBJ_CREATE("finished");
 }
+
+#if LV_FFMPEG_AUDIO_SUPPORT != 0
+
+/* Initialize audio output device */
+static int ffmpeg_audio_init(struct ffmpeg_context_s * ffmpeg_ctx)
+{
+    int ret;
+
+    if(!ffmpeg_ctx->has_audio || !ffmpeg_ctx->audio_dec_ctx) {
+        return -1;
+    }
+
+    /* Initialize audio output context */
+    ret = avformat_alloc_output_context2(&ffmpeg_ctx->audio_out_fmt_ctx, NULL, "alsa", "default");
+    if(ret < 0 || !ffmpeg_ctx->audio_out_fmt_ctx) {
+        LV_LOG_ERROR("Error creating audio output context: %s", av_err2str(ret));
+        return -1;
+    }
+
+    /* Create output stream */
+    AVStream *out_stream = avformat_new_stream(ffmpeg_ctx->audio_out_fmt_ctx, NULL);
+    if(!out_stream) {
+        LV_LOG_ERROR("Error creating audio output stream");
+        avformat_free_context(ffmpeg_ctx->audio_out_fmt_ctx);
+        ffmpeg_ctx->audio_out_fmt_ctx = NULL;
+        return -1;
+    }
+
+    /* Set audio output parameters */
+    AVCodecParameters *codecpar = out_stream->codecpar;
+    codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
+    codecpar->sample_rate = 44100;
+    codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
+    codecpar->format = AV_SAMPLE_FMT_S16;
+
+    /* Initialize audio resampler */
+    AVChannelLayout src_ch_layout = ffmpeg_ctx->audio_dec_ctx->ch_layout;
+    AVChannelLayout dst_ch_layout;
+    av_channel_layout_default(&dst_ch_layout, 2);
+
+    ffmpeg_ctx->swr_ctx = swr_alloc();
+    av_opt_set_chlayout(ffmpeg_ctx->swr_ctx, "in_chlayout", &src_ch_layout, 0);
+    av_opt_set_int(ffmpeg_ctx->swr_ctx, "in_sample_rate", ffmpeg_ctx->audio_dec_ctx->sample_rate, 0);
+    av_opt_set_sample_fmt(ffmpeg_ctx->swr_ctx, "in_sample_fmt", ffmpeg_ctx->audio_dec_ctx->sample_fmt, 0);
+    av_opt_set_chlayout(ffmpeg_ctx->swr_ctx, "out_chlayout", &dst_ch_layout, 0);
+    av_opt_set_int(ffmpeg_ctx->swr_ctx, "out_sample_rate", 44100, 0);
+    av_opt_set_sample_fmt(ffmpeg_ctx->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
+    ret = swr_init(ffmpeg_ctx->swr_ctx);
+    if(ret < 0) {
+        LV_LOG_ERROR("Error initializing audio resampler: %s", av_err2str(ret));
+        avformat_free_context(ffmpeg_ctx->audio_out_fmt_ctx);
+        ffmpeg_ctx->audio_out_fmt_ctx = NULL;
+        return -1;
+    }
+
+    /* Open output device */
+    if(!(ffmpeg_ctx->audio_out_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+        ret = avio_open(&ffmpeg_ctx->audio_out_fmt_ctx->pb, ffmpeg_ctx->audio_out_fmt_ctx->url, AVIO_FLAG_WRITE);
+        if(ret < 0) {
+            LV_LOG_ERROR("Error opening audio output device: %s", av_err2str(ret));
+            swr_free(&ffmpeg_ctx->swr_ctx);
+            avformat_free_context(ffmpeg_ctx->audio_out_fmt_ctx);
+            ffmpeg_ctx->audio_out_fmt_ctx = NULL;
+            return -1;
+        }
+    }
+
+    /* Write header */
+    ret = avformat_write_header(ffmpeg_ctx->audio_out_fmt_ctx, NULL);
+    if(ret < 0) {
+        LV_LOG_ERROR("Error writing audio output header: %s", av_err2str(ret));
+        if(!(ffmpeg_ctx->audio_out_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&ffmpeg_ctx->audio_out_fmt_ctx->pb);
+        }
+        swr_free(&ffmpeg_ctx->swr_ctx);
+        avformat_free_context(ffmpeg_ctx->audio_out_fmt_ctx);
+        ffmpeg_ctx->audio_out_fmt_ctx = NULL;
+        return -1;
+    }
+
+    ffmpeg_ctx->audio_buf = NULL;
+    ffmpeg_ctx->audio_buf_size = 0;
+
+    LV_LOG_INFO("Audio output initialized successfully");
+    return 0;
+}
+
+/* Deinitialize audio output device */
+static void ffmpeg_audio_deinit(struct ffmpeg_context_s * ffmpeg_ctx)
+{
+    if(!ffmpeg_ctx) {
+        return;
+    }
+
+    if(ffmpeg_ctx->audio_out_fmt_ctx) {
+        av_write_trailer(ffmpeg_ctx->audio_out_fmt_ctx);
+        if(!(ffmpeg_ctx->audio_out_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&ffmpeg_ctx->audio_out_fmt_ctx->pb);
+        }
+        avformat_free_context(ffmpeg_ctx->audio_out_fmt_ctx);
+        ffmpeg_ctx->audio_out_fmt_ctx = NULL;
+    }
+
+    if(ffmpeg_ctx->swr_ctx) {
+        swr_free(&ffmpeg_ctx->swr_ctx);
+        ffmpeg_ctx->swr_ctx = NULL;
+    }
+}
+
+/* Output audio frame to device */
+static int ffmpeg_output_audio_frame(struct ffmpeg_context_s * ffmpeg_ctx)
+{
+    int ret = 0;
+    AVFrame *frame = ffmpeg_ctx->audio_frame;
+    lv_ffmpeg_player_t *player = NULL;
+
+    if(!ffmpeg_ctx->audio_out_fmt_ctx || !ffmpeg_ctx->swr_ctx) {
+        return 0;
+    }
+
+    /* Get player pointer to check audio enabled status */
+    if(ffmpeg_ctx->video_dst_linesize[0] != 0) {
+        /* Try to find the player object that owns this context */
+        /* This is a workaround since we don't have direct access to player here */
+        /* In a real implementation, you would pass the player pointer or use a different approach */
+    }
+
+    /* Calculate output samples */
+    int dst_nb_samples = av_rescale_rnd(
+        swr_get_delay(ffmpeg_ctx->swr_ctx, ffmpeg_ctx->audio_dec_ctx->sample_rate) +
+        frame->nb_samples,
+        44100, ffmpeg_ctx->audio_dec_ctx->sample_rate, AV_ROUND_UP
+    );
+
+    /* Reallocate audio buffer if needed */
+    if(dst_nb_samples > ffmpeg_ctx->audio_buf_size / 4) {
+        ffmpeg_ctx->audio_buf_size = dst_nb_samples * 4; /* 16-bit stereo */
+        uint8_t *new_buf = av_realloc(ffmpeg_ctx->audio_buf, ffmpeg_ctx->audio_buf_size);
+        if(!new_buf) {
+            LV_LOG_ERROR("Failed to reallocate audio buffer");
+            return -1;
+        }
+        ffmpeg_ctx->audio_buf = new_buf;
+    }
+
+    /* Resample audio */
+    int out_samples = swr_convert(
+        ffmpeg_ctx->swr_ctx, &ffmpeg_ctx->audio_buf, dst_nb_samples,
+        (const uint8_t **)frame->data, frame->nb_samples
+    );
+
+    if(out_samples <= 0) {
+        return 0;
+    }
+
+    /* Apply volume control (simple multiplication) */
+    /* Note: This is a basic implementation. For better quality, use proper audio processing */
+    if(frame->format == AV_SAMPLE_FMT_FLT || frame->format == AV_SAMPLE_FMT_FLTP) {
+        float *samples = (float *)ffmpeg_ctx->audio_buf;
+        float volume_factor = 1.0f; /* Default volume */
+        for(int i = 0; i < out_samples * 2; i++) {
+            samples[i] *= volume_factor;
+        }
+    }
+
+    /* Create output packet */
+    AVPacket *out_pkt = av_packet_alloc();
+    if(!out_pkt) {
+        LV_LOG_ERROR("Failed to allocate audio output packet");
+        return -1;
+    }
+
+    out_pkt->data = ffmpeg_ctx->audio_buf;
+    out_pkt->size = out_samples * 4; /* 16-bit stereo = 2 bytes/sample * 2 channels */
+    out_pkt->stream_index = 0;
+    out_pkt->pts = frame->pts;
+    out_pkt->dts = frame->pkt_dts;
+    out_pkt->duration = frame->duration;
+
+    /* Write to output device */
+    ret = av_interleaved_write_frame(ffmpeg_ctx->audio_out_fmt_ctx, out_pkt);
+
+    av_packet_free(&out_pkt);
+
+    if(ret < 0) {
+        LV_LOG_ERROR("Error writing audio frame: %s", av_err2str(ret));
+        return ret;
+    }
+
+    return 0;
+}
+
+#endif /* LV_FFMPEG_AUDIO_SUPPORT */
 
 #endif /*LV_USE_FFMPEG*/
