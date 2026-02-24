@@ -21,6 +21,10 @@
 #include "../../stdlib/lv_string.h"
 #include "../lv_draw_mask.h"
 
+#if LV_USE_SUNXIFB_G2D_FILL
+#include "../../../lv_drivers/display/sunxig2d.h"
+#endif
+
 /*********************
  *      DEFINES
  *********************/
@@ -63,6 +67,25 @@ void lv_draw_sw_fill(lv_draw_task_t * t, lv_draw_fill_dsc_t * dsc, const lv_area
 
     /*Most simple case: just a plain rectangle*/
     if(dsc->radius == 0 && (grad_dir == LV_GRAD_DIR_NONE)) {
+#if LV_USE_SUNXIFB_G2D_FILL
+        /* Try to use G2D hardware acceleration for filling */
+        int32_t area_size = lv_area_get_width(&bg_coords) * lv_area_get_height(&bg_coords);
+        if(area_size >= 100 && dsc->opa >= LV_OPA_COVER) {
+            lv_draw_buf_t *draw_buf = t->draw_buf;
+            if(draw_buf && draw_buf->buf_act) {
+                int ret = sunxifb_g2d_fill(
+                    (lv_color_t*)draw_buf->buf_act,
+                    &t->clip_area,
+                    &bg_coords,
+                    dsc->color,
+                    dsc->opa
+                );
+                if(ret == 0) {
+                    return;  /* G2D acceleration succeeded */
+                }
+            }
+        }
+#endif
         blend_dsc.blend_area = &bg_coords;
         blend_dsc.opa = dsc->opa;
         lv_draw_sw_blend(t, &blend_dsc);

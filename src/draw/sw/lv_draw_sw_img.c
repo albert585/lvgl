@@ -30,6 +30,10 @@
     #include LV_DRAW_SW_ASM_CUSTOM_INCLUDE
 #endif
 
+#if LV_USE_SUNXIFB_G2D_BLIT || LV_USE_SUNXIFB_G2D_BLEND || LV_USE_SUNXIFB_G2D_SCALE
+#include "../../../lv_drivers/display/sunxig2d.h"
+#endif
+
 /*********************
  *      DEFINES
  *********************/
@@ -281,6 +285,72 @@ static void img_draw_core(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_d
     }
     /*The simplest case just copy the pixels into the draw_buf. Blending will convert the colors if needed*/
     else if(!transformed && !radius && draw_dsc->recolor_opa <= LV_OPA_MIN && draw_dsc->colorkey == NULL) {
+#if LV_USE_SUNXIFB_G2D_BLIT || LV_USE_SUNXIFB_G2D_BLEND || LV_USE_SUNXIFB_G2D_SCALE
+        /* Try to use G2D hardware acceleration for image rendering */
+        lv_draw_buf_t *draw_buf = t->draw_buf;
+        if(draw_buf && draw_buf->buf_act) {
+            int32_t img_w = lv_area_get_width(img_coords);
+            int32_t img_h = lv_area_get_height(img_coords);
+            int32_t area_size = img_w * img_h;
+            
+            /* Determine if we should use G2D based on the operation type */
+            bool use_g2d = false;
+            int g2d_ret = -1;
+            
+            /* BLIT: Opaque image copy */
+#if LV_USE_SUNXIFB_G2D_BLIT
+            if(area_size >= 1000 && draw_dsc->opa >= LV_OPA_COVER) {
+                g2d_ret = sunxifb_g2d_blit(
+                    (lv_color_t*)draw_buf->buf_act,
+                    &t->clip_area,
+                    img_coords,
+                    (lv_color_t*)src_buf,
+                    img_coords,
+                    draw_dsc->opa
+                );
+                use_g2d = (g2d_ret == 0);
+            }
+#endif
+            
+            /* BLEND: Semi-transparent image blend */
+#if LV_USE_SUNXIFB_G2D_BLEND
+            if(!use_g2d && area_size >= 500 && draw_dsc->opa > LV_OPA_MIN && draw_dsc->opa < LV_OPA_COVER) {
+                g2d_ret = sunxifb_g2d_blend(
+                    (lv_color_t*)draw_buf->buf_act,
+                    &t->clip_area,
+                    img_coords,
+                    (lv_color_t*)src_buf,
+                    img_coords,
+                    draw_dsc->opa,
+                    false
+                );
+                use_g2d = (g2d_ret == 0);
+            }
+#endif
+            
+            /* SCALE: Scaled image rendering */
+#if LV_USE_SUNXIFB_G2D_SCALE
+            if(!use_g2d && (draw_dsc->scale_x != LV_SCALE_NONE || draw_dsc->scale_y != LV_SCALE_NONE) &&
+               area_size >= 1000 && draw_dsc->opa >= LV_OPA_COVER) {
+                g2d_ret = sunxifb_g2d_scale(
+                    (lv_color_t*)draw_buf->buf_act,
+                    &t->clip_area,
+                    img_coords,
+                    (lv_color_t*)src_buf,
+                    img_coords,
+                    draw_dsc->opa,
+                    draw_dsc->scale_x,
+                    &(lv_point_t){img_w >> 1, img_h >> 1}
+                );
+                use_g2d = (g2d_ret == 0);
+            }
+#endif
+            
+            if(use_g2d) {
+                return;  /* G2D acceleration succeeded */
+            }
+        }
+#endif
         blend_dsc.src_area = img_coords;
         blend_dsc.src_buf = src_buf;
         blend_dsc.blend_area = img_coords;

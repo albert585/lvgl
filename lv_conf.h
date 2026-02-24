@@ -1,0 +1,1 @@
+/home/albert/Downloads/全志在线账号获取默认sdk/tina-v853-open/openwrt/package/thirdparty/gui/lvgl-9.3/lv_examples/lv_conf.h
